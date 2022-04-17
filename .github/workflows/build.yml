@@ -1,0 +1,181 @@
+name: Build QMK Toolbox
+on: [workflow_dispatch]
+
+jobs:
+  download:
+    name: Create binary tools
+    runs-on: macOS-latest
+    env:
+      ARCHITECTURE: arm64_monterey monterey
+      OLDPATH: "@@HOMEBREW_PREFIX@@/opt"
+      NEWPATH: "@executable_path/../Frameworks"
+    strategy:
+      fail-fast: false
+      matrix:
+        formula:
+        - avrdude
+        - bootloadhid
+        - dfu-programmer
+        - dfu-util
+        - teensy_loader_cli
+        - hidapi
+        - libusb
+        - libusb-compat
+        - libftdi0
+        - mdloader
+
+    steps:
+    - name: Download brew formulas
+      if: ${{ matrix.formula != 'mdloader' }}
+      env:
+        json: curl -s https://formulae.brew.sh/api/formula/${{ matrix.formula }}.json
+        parser: python -c "import json,sys;print(json.load(sys.stdin)['bottle']['stable']['files']['$arch']['url'])"
+      run: |
+        set -x
+        for arch in $ARCHITECTURE; do
+          mkdir -p $arch
+          curl -sLH "Authorization: Bearer QQ==" $(${{ env.json }}|${{ env.parser }}) -o - | tar vzx --strip-components 3 -C $arch \
+          $([[ ${{ matrix.formula }} =~ lib || ${{ matrix.formula }} =~ hidapi ]] && printf "*lib/*.dylib" || printf "*bin/*")
+        done
+
+    - name: Update ${{ matrix.formula }} dynamic library
+      if: ${{ matrix.formula != 'mdloader' }}
+      run: |
+        set -x
+        for arch in $ARCHITECTURE; do
+          cd $arch
+          case ${{ matrix.formula }} in
+            avrdude)
+              install_name_tool -change "$OLDPATH/libftdi0/lib/libftdi.1.dylib" "$NEWPATH/libftdi.1.dylib" avrdude
+              install_name_tool -change "$OLDPATH/hidapi/lib/libhidapi.0.dylib" "$NEWPATH/libhidapi.0.dylib" avrdude
+              install_name_tool -change "$OLDPATH/libusb/lib/libusb-1.0.0.dylib" "$NEWPATH/libusb-1.0.0.dylib" avrdude
+              install_name_tool -change "$OLDPATH/libusb-compat/lib/libusb-0.1.4.dylib" "$NEWPATH/libusb-0.1.4.dylib" avrdude
+              codesign --force -s - avrdude ;;
+            bootloadhid)
+              install_name_tool -change "$OLDPATH/libusb-compat/lib/libusb-0.1.4.dylib" "$NEWPATH/libusb-0.1.4.dylib" bootloadHID
+              codesign --force -s - bootloadHID ;;
+            dfu-programmer)
+              install_name_tool -change "$OLDPATH/libusb-compat/lib/libusb-0.1.4.dylib" "$NEWPATH/libusb-0.1.4.dylib" dfu-programmer
+              codesign --force -s - dfu-programmer ;;
+            dfu-util)
+              install_name_tool -change "$OLDPATH/libusb/lib/libusb-1.0.0.dylib" "$NEWPATH/libusb-1.0.0.dylib" dfu-util
+              codesign --force -s - dfu-util ;;
+            hidapi)
+              install_name_tool -id "$NEWPATH/libhidapi.0.dylib" libhidapi.0.dylib ;;
+            libusb)
+              install_name_tool -id "$NEWPATH/libusb-1.0.0.dylib" libusb-1.0.0.dylib ;;
+            libusb-compat)
+              install_name_tool -change "$OLDPATH/libusb/lib/libusb-1.0.0.dylib" "$NEWPATH/libusb-1.0.0.dylib" libusb-0.1.4.dylib
+              install_name_tool -id "$NEWPATH/libusb-0.1.4.dylib" libusb-0.1.4.dylib ;;
+            libftdi0)
+              install_name_tool -change "$OLDPATH/libusb-compat/lib/libusb-0.1.4.dylib" "$NEWPATH/libusb-0.1.4.dylib" libftdi.1.dylib
+              install_name_tool -id "$NEWPATH/libftdi.1.dylib" libftdi.1.dylib ;;
+          esac
+          cd ..
+        done
+
+    - name: Download mdloader
+      if: ${{ matrix.formula == 'mdloader' }}
+      uses: actions/checkout@v3
+      with:
+        repository: Massdrop/mdloader
+
+    - name: Build mdloader
+      if: ${{ matrix.formula == 'mdloader' }}
+      env:
+        target_flag: $([ $arch = monterey ] && printf "x86_64-apple-macos10.12" || printf "arm64-apple-macos11")
+      run: |
+        set -x
+        for arch in $ARCHITECTURE; do
+          mkdir -p $arch
+          make CFLAGS="-v -Wall -std=gnu99 -target ${{ env.target_flag }}" clean all
+          cp -v build/mdloader $arch/
+        done
+
+    - name: Create universal ${{ matrix.formula }}
+      run: |
+        set -x
+        mkdir -p universal/
+        merge_bin() { lipo -create -output universal/$1 monterey/$1 arm64_monterey/$1; }
+        case ${{ matrix.formula }} in
+          bootloadhid) merge_bin bootloadHID ;;
+          hidapi) merge_bin libhidapi.0.dylib ;;
+          libusb) merge_bin libusb-1.0.0.dylib ;;
+          libusb-compat) merge_bin libusb-0.1.4.dylib ;;
+          libftdi0) merge_bin libftdi.1.dylib ;;
+          *) merge_bin ${{ matrix.formula }} ;;
+        esac
+
+    - name: Archive arm64 ${{ matrix.formula }}
+      uses: actions/upload-artifact@v3
+      continue-on-error: true
+      with:
+        retention-days: 1
+        name: arm64
+        path: arm64_monterey/
+
+    - name: Archive universal ${{ matrix.formula }}
+      uses: actions/upload-artifact@v3
+      continue-on-error: true
+      with:
+        retention-days: 1
+        name: universal
+        path: universal/
+
+  build:
+    runs-on: macOS-latest
+    needs: download
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+        - arm64
+        - universal
+
+    steps:
+    - name: Setup xcode
+      uses: maxim-lobanov/setup-xcode@v1
+      with:
+        xcode-version: latest-stable
+
+    - name: Checkout QMK Toolbox
+      uses: actions/checkout@v3
+      with:
+        repository: qmk/qmk_toolbox
+
+    - name: Download ${{ matrix.arch }} binary tools
+      uses: actions/download-artifact@v3
+      with: 
+        name: ${{ matrix.arch }}
+        path: "macos/QMK Toolbox/Resources/"
+
+    - name: Check binary permissions
+      working-directory: ./macos/QMK Toolbox/Resources
+      env:
+        BINARIES: avrdude bootloadHID dfu-programmer dfu-util mdloader teensy_loader_cli
+      run: |
+        set -x
+        status=0
+        for b in $BINARIES; do
+          perm=$(stat -f "%Lp" $b)
+          echo "$b: $perm"
+          [[ $perm == "755" ]] || status=1
+        done
+        exit $status
+
+    - name: Build ${{ matrix.arch }} Toolbox
+      working-directory: ./macos
+      env:
+        arch_option: $([ ${{ matrix.arch }} = arm64 ] && printf " -arch arm64")
+      run: |
+        set -x
+        mkdir -p build
+        xcodebuild ${{ env.arch_option }} CONFIGURATION_BUILD_DIR=build
+        ditto -ck --rsrc --sequesterRsrc -v --keepParent "build/QMK Toolbox.app" build/QMK.Toolbox.${{ matrix.arch }}.app.zip
+
+    - name: Upload ${{ matrix.arch }} build
+      uses: actions/upload-artifact@v3
+      with:
+        name: QMK.Toolbox.${{ matrix.arch }}.app.zip
+        path: macos/build/QMK.Toolbox.${{ matrix.arch }}.app.zip
+
