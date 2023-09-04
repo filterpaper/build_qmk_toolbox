@@ -76,7 +76,7 @@ jobs:
 
     - name: Download mdloader
       if: ${{ matrix.formula == 'mdloader' }}
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         repository: Massdrop/mdloader
 
@@ -139,7 +139,7 @@ jobs:
         xcode-version: latest-stable
 
     - name: Checkout QMK Toolbox
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         repository: qmk/qmk_toolbox
 
